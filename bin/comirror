@@ -1,0 +1,262 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use 5.010;
+
+use WWW::Mechanize;
+
+my $mech = WWW::Mechanize->new(
+	stack_depth => 2,
+);
+$mech->agent_alias('Linux Mozilla');
+
+our $VERSION = '0.1';
+
+my %conf     = file_to_hash('comirror.conf');
+my %state    = file_to_hash('comirror.state');
+my $uri      = shift || $state{'uri'};
+my $image_re = $conf{'image_re'};
+my $exit     = 1;
+
+if ($uri ~~ ['-v', '--version']) {
+	say "comirror version $VERSION";
+	exit 0;
+}
+
+if (not defined $uri or not defined $image_re) {
+	die("last_uri or image_re not found / specified\n");
+}
+
+$image_re = qr{$image_re};
+
+sub find_next_link {
+
+	if (defined $conf{'next_link'}) {
+		my $link = $mech->find_link(text => $conf{'next_link'});
+		if ($link) {
+			return $link;
+		}
+	}
+	else {
+
+		foreach my $re (
+			qr{ ^ next $ }ix,
+			qr{   next   }ix,
+		)
+		{
+			my $link = $mech->find_link(text_regex => $re);
+			if ($link) {
+				return $link;
+			}
+		}
+	}
+	save_state();
+	say "Cannot find next link. We might have reached the end of the comic.";
+	exit $exit;
+}
+
+sub find_image {
+	my $image;
+
+	if (
+		$conf{'link_to_image'}
+		and $mech->find_link(url_abs_regex => $image_re)
+	   )
+	{
+		$image = $mech->find_link(url_abs_regex => $image_re);
+	}
+	else {
+		$image = $mech->find_image(url_abs_regex => $image_re);
+	}
+
+	if ($image) {
+		my $tmpmech = WWW::Mechanize->new();
+		$tmpmech->get($image->url_abs);
+		return $tmpmech;
+	}
+	return;
+}
+
+sub get_image {
+	my $tmpmech = find_image() or return;
+	my $filename = (split(qr{/}o, $tmpmech->uri->as_string))[-1];
+
+	if (-e $filename) {
+		say "img: $filename (skipped)";
+	}
+	else {
+		$exit = 0;
+		say "img: $filename";
+		open(my $fh, '>', $filename) or die("Cannot open $filename: $!");
+		print {$fh} $tmpmech->content();
+		close($fh) or die("Cannot close $filename: $!");
+	}
+
+	return;
+}
+
+sub file_to_hash {
+	my ($file) = @_;
+	my %return;
+
+	if (not -e $file) {
+		return;
+	}
+
+	open(my $fh, '<', $file) or die("Cannot read $file: $!\n");
+	binmode($fh, ':utf8');
+	while(my $line = <$fh>) {
+		$line =~ / ^ (?<key> \S+ ) [[:space:]]+ (?<value> .*) $ /x or next;
+		$return{$+{key}} = $+{value};
+	}
+	close($fh);
+	return %return;
+}
+
+sub save_state {
+	# Some webcomics have a non-regular page for the last (as in, latest)
+	# image. Work around this.
+	$mech->back();
+
+	$state{'uri'} = $mech->uri->as_string;
+
+	open(my $fh, '>', 'comirror.state') or die("Cannot open comirror.state: $!");
+	while (my ($key, $value) = each(%state)) {
+		print {$fh} "$key\t$value\n";
+	}
+	close($fh) or die("Cannot close last_uri: $!");
+	return;
+}
+
+local $SIG{INT} = sub {
+	save_state();
+	exit $exit;
+};
+
+while (
+	$mech->get($uri)
+	and $mech->success()
+	and $mech->status() == 200
+      )
+{
+	say "URI: $uri";
+
+	get_image;
+
+	$uri = find_next_link->URI->abs->as_string;
+
+	if ($uri eq $mech->uri->as_string) {
+		save_state();
+		say "The 'next' link lead us to a loop.";
+		say "This is probably because we reached the end of the comic.";
+		exit $exit;
+	}
+
+	print "\n";
+	# Avoid accidently DoSing webservers.
+	sleep(1);
+}
+
+
+
+
+__END__
+
+=head1 NAME
+
+B<comirror> - Generic webcomic mirrorer
+
+=head1 SYNOPSIS
+
+B<comirror> [I<comic url>]
+
+=head1 DESCRIPTION
+
+B<comirror> "reads" a webcomic while saving the comic images to the current
+working directory.
+
+=head1 OPTIONS
+
+B<comirror> takes no options.
+
+=head1 EXIT STATUS
+
+Zero if at least one new comic image was downloaded, one if either no images
+were found or all found images already existed in the current directory.  Any
+other non-zero return value indicates grave errors.
+
+=head1 CONFIGURATION
+
+B<comirror> is designed to operate in the current working directory.  Images
+are saved to it; the configuration is read from F<comirror.conf> and the last
+state (if any) is read from F<comirror.state>.
+
+Both files are formatted in the form key <tab> value with one key-value pair
+per line.  Comments or empty lines are not supported.  F<comirror.state> is
+automatically written when B<comirror> terminates.
+
+=head2 COMIRROR.CONF
+
+A little explanation of the F<comirror.conf> keys.
+Note that comirror-setup(1) will automatically create this file for you, you
+only need to edit it if comirror-setup(1) didn't work properly or you don't
+want to use it at all.
+
+=over
+
+=item image_re
+
+A regular expression matching the URL of the webcomic image to be saved.
+
+=item next_link
+
+The text on the link to the next image.  Can be left out if it contains
+"next".
+
+=item link_to_image
+
+If this is set to a true value, B<comirror> will first try to find a link
+pointing to image_re and only if that fails look directly for images.  This is
+useful for comics with small-ish preview images which link to larger ones.
+
+The future of this option is unclear, such behaviour may become the default.
+
+=back
+
+=head2 COMIRROR.STATE
+
+You should not need to edit this.
+
+=over
+
+=item uri
+
+Absolute URI to the last but one comic page B<comirror> was inspecting.  Can
+be overridden by the commandline argument.  Exists so that B<comirror> will
+resume its comic crawl from the right point when it's started again.
+
+=back
+
+=head1 DEPENDENCIES
+
+B<comirror> requires the perl module WWW::Mechanize
+
+=head1 BUGS AND LIMITATIONS
+
+This script has no brain.  It has very limited knowledge about the usual
+layout of a webcomic and makes a few guesses which happen to work in a lot of
+cases.  However, there may well be webcomics which (combined with an
+unrestrictive image_re) lead B<comirror> to crawling lots of non-comic images.
+So of course, use at your own risk.
+
+=head1 SEE ALSO
+
+comirror-setup(1)
+
+=head1 AUTHOR
+
+Copyright (C) 2010 by Daniel Friesel E<lt>derf@chaosdorf.deE<gt>
+
+=head1 LICENSE
+
+  0. You just DO WHAT THE FUCK YOU WANT TO.

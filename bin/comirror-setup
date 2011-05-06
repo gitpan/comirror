@@ -1,0 +1,239 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use 5.010;
+
+use Getopt::Long;
+use WWW::Mechanize;
+
+my @mechs;
+my @images;
+my @unique_images;
+my ($image_re, $cache) = (q{}) x 2;
+my $length;
+my $conf = {};
+my $state;
+my @opts = (
+	[
+		'batch',
+		q{},
+		undef,
+		0,
+	],
+	[
+		'link-to-image',
+		q{!},
+		'Try downloading links instead of images matching image_re first?',
+		0,
+	],
+	[
+		'version',
+		q{},
+		undef,
+		0,
+	],
+);
+our $VERSION = '0.1';
+
+local $| = 1;
+
+binmode(STDOUT, ':utf8');
+
+sub hash_to_file {
+	my ($hash, $file) = @_;
+	open(my $fh, '>', $file) or die("Can't open $file for writing: $!\n");
+	binmode($fh, ':utf8');
+	while (my ($key, $value) = each(%{$hash})) {
+		$key =~ tr/-/_/;
+		print {$fh} "$key\t$value\n";
+	}
+	close($fh);
+	return;
+}
+
+sub parse_or_ask_options {
+
+	if ($conf->{'batch'}) {
+		delete $conf->{'batch'};
+		return;
+	}
+
+	for my $ref (@opts) {
+		my ($opt, $desc, $default) = @{$ref}[0, 2, 3];
+
+		if (defined $desc and not exists $conf->{$opt}) {
+			print "${desc} (default: ${default}) ";
+			my $reply = <STDIN>;
+			chomp $reply;
+			$conf->{$opt} = $reply;
+		}
+	}
+	return;
+}
+
+GetOptions($conf, map { $_->[0] . $_->[1] } @opts);
+
+if ($conf->{'version'}) {
+	say "comirror version $VERSION";
+	exit 0;
+}
+
+if (not -t STDOUT) {
+	$conf->{'batch'} = 1;
+}
+
+if (@ARGV != 3 ) {
+	die("Need three URLs to compare (first, second, last but one)\n");
+}
+
+print 'Fetching pages';
+
+for my $url (@ARGV) {
+	push(@mechs, WWW::Mechanize->new( stackdepth => 0 ));
+	$mechs[-1]->agent_alias('Linux Mozilla');
+	$mechs[-1]->get($url);
+	print q{.};
+}
+
+print "\nComparing images";
+
+for my $i ( 0 .. $#mechs ) {
+	for my $image ($mechs[$i]->find_all_images()) {
+		push(@{$images[$i]}, $image->url_abs());
+	}
+	print q{.};
+}
+
+print "\n";
+
+for my $link ($mechs[0]->find_all_links()) {
+	if ($link->url_abs eq $ARGV[1]) {
+		$conf->{'next_link'} = $link->text;
+	}
+}
+
+# A bit fragile so far. We assume that every site is exactly the same, except
+# for the actual comic image. For this to work, we need to be sure that we are
+# not comparing with a first or last site, because those may be missing a
+# next/prev icon and therefore confuse us.
+
+for my $i ( 0 .. $#{$images[1]} ) {
+	if ($images[1]->[$i] ne $images[2]->[$i]) {
+		push(@unique_images, [$images[1]->[$i], $images[2]->[$i]]);
+	}
+}
+
+# XKCD has a weird robot detection image. So we just take the first
+# @unique_images element for now. Again, this could use more elegance some
+# time.
+
+if (length($unique_images[0]->[0]) <= length($unique_images[0]->[1])) {
+	$length = length($unique_images[0]->[0]);
+}
+else {
+	$length = length($unique_images[0]->[1]);
+}
+
+for my $offset ( 0 .. $length ) {
+	my $char1 = substr($unique_images[0]->[0], $offset, 1);
+	my $char2 = substr($unique_images[0]->[1], $offset, 1);
+
+	if ($char1 ne $char2) {
+		$image_re .= q{.+};
+		last;
+	}
+
+	$cache .= $char1;
+
+	# Prevent using .../something.+ if we happen to have two images whose
+	# names start with the same letter(s). Again, fragile.
+	if ($char1 =~ / [^a-zA-Z0-9] /x) {
+		$image_re .= $cache;
+		$cache = q{};
+	}
+}
+
+$state->{'uri'} = $ARGV[0];
+
+$conf->{'image_re'} = $image_re;
+
+say "\nimage_re: $conf->{image_re}";
+say "\"next\" link text: $conf->{next_link}";
+
+parse_or_ask_options();
+
+hash_to_file($conf , 'comirror.conf' );
+hash_to_file($state, 'comirror.state');
+
+say "\nIf everything is correct, type 'comirror' to start mirroring";
+
+__END__
+
+=head1 NAME
+
+B<comirror-setup> - Set up a directory to be used by B<comirror>
+
+=head1 SYNOPSIS
+
+B<comirror-setup> I<comis urls...>
+
+=head1 DESCRIPTION
+
+B<comirror-setup> takes three URL arguments: The very first page of the web
+comic, the second page, and the last but one page.
+
+Based on these arguments, it tries to set up the current working directory so
+that you only need to call B<comirror> to mirror the webcomic you were
+pointing to.  It does this by comparing the last two URLs to determine a
+correct regular expression for the comic images and comparing the first two to
+figure out the text on the "next" link.
+
+It then creates F<comirror.conf> and F<comirror.state> so that you only need
+to call comirror(1) to start downloading.
+
+Unless all options (or B<--batch>) were specified on the commandline,
+B<comirror> will interactively ask the user for further options.
+
+=head1 OPTIONS
+
+=over
+
+=item B<--batch>
+
+Do not ask questions interactively.  Take default values or those specified
+via options on the commandline.
+
+=item B<--link-to-image> I<bool>
+
+First try downloading a link matching image_re, and if that fails look for an
+image matching image_re. Note that this does not (yet) affect image_re
+detection.
+
+=back
+
+=head1 EXIT STATUS
+
+Non-zero on grave errors, zero otherwise.
+
+=head1 CONFIGURATION
+
+B<comirror-setup> is not configurable.
+
+=head1 DEPENDENCIES
+
+This script requires the perl module WWW::Mechanize.
+
+=head1 BUGS AND LIMITATIONS
+
+As for B<comirror>: This script has no brain.
+So far, this script is very dumb and fragile.  It's recommended to take a
+quick glance at the image_re before actually calling comirror to make sure you
+get what you want.
+
+=head1 AUTHOR
+
+Copyright (C) 2010 by Daniel Friesel E<lt>derf@chaosdorf.deE<gt>
+
+=head1 LICENSE
+
+  0. You just DO WHAT THE FUCK YOU WANT TO.

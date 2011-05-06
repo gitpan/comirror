@@ -1,0 +1,27 @@
+comirror - automated mirrorer for webcomics and image gallerys
+--------------------------------------------------------------
+
+Dependencies
+------------
+
+ * perl >= 5.10
+ * WWW::Mechanize
+
+Installation
+------------
+
+$ perl Build.PL
+$ perl Build
+$ sudo perl Build install
+
+Testing
+-------
+
+Requires:
+ * Test::Cmd
+ * Test::Compile
+ * Test::More
+ * Test::Pod
+
+Run:
+$ perl Build test
